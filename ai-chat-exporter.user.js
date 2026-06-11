@@ -652,6 +652,77 @@
   const ChatExporter = {
     _currentChatData: null, // Store the last extracted chat data
     _selectedMessageIds: new Set(), // Store IDs of selected messages for export
+    _chatGPTTurnCache: new Map(), // Cache virtualized ChatGPT turns by stable data-testid
+    _chatGPTCacheUrl: null,
+
+    resetChatGPTTurnCacheIfNeeded() {
+      const currentUrl = Utils.getCleanUrl();
+      if (ChatExporter._chatGPTCacheUrl !== currentUrl) {
+        ChatExporter._chatGPTTurnCache.clear();
+        ChatExporter._chatGPTCacheUrl = currentUrl;
+      }
+    },
+
+    getChatGPTTurnNumber(article) {
+      const testId = article.getAttribute("data-testid") || "";
+      const match = testId.match(/conversation-turn-(\d+)/);
+      return match ? parseInt(match[1], 10) : Number.MAX_SAFE_INTEGER;
+    },
+
+    cacheChatGPTTurn(article) {
+      const testId = article.getAttribute("data-testid");
+      if (!testId) return;
+
+      const turnType = article.getAttribute("data-turn");
+      const header =
+        article.querySelector(CHATGPT_HEADER_SELECTOR)?.textContent?.trim() ||
+        "";
+      const isUser =
+        turnType === "user" ||
+        header.toLowerCase().includes(CHATGPT_USER_MESSAGE_INDICATOR);
+      const author = isUser ? "user" : "ai";
+
+      // Target exactly the content container to ignore action buttons.
+      const contentTarget = article.querySelector(CHATGPT_TEXT_DIV_SELECTOR);
+      const contentHtml = contentTarget || article;
+      const contentText = contentHtml.innerText.trim();
+
+      if (!contentText) return;
+
+      const cached = ChatExporter._chatGPTTurnCache.get(testId);
+      if (cached && cached.contentText.length >= contentText.length) return;
+
+      ChatExporter._chatGPTTurnCache.set(testId, {
+        id: `${author}-${ChatExporter.getChatGPTTurnNumber(article)}`,
+        author,
+        contentHtml: contentHtml.cloneNode
+          ? contentHtml.cloneNode(true)
+          : contentHtml,
+        contentText,
+        timestamp: new Date(),
+        turnNumber: ChatExporter.getChatGPTTurnNumber(article),
+      });
+    },
+
+    buildChatGPTMessagesFromCache() {
+      let chatIndex = 1;
+
+      return [...ChatExporter._chatGPTTurnCache.values()]
+        .sort((a, b) => a.turnNumber - b.turnNumber)
+        .map((cached) => {
+          const message = {
+            id: cached.id,
+            author: cached.author,
+            contentHtml: cached.contentHtml,
+            contentText: cached.contentText,
+            timestamp: cached.timestamp,
+            originalIndex: chatIndex,
+          };
+
+          if (cached.author !== "user") chatIndex++;
+          return message;
+        });
+    },
 
     /**
      * Extracts chat data from ChatGPT's DOM structure.
@@ -659,51 +730,21 @@
      * @returns {object|null} The standardized chat data, or null.
      */
     extractChatGPTChatData(doc) {
+      ChatExporter.resetChatGPTTurnCacheIfNeeded();
+
       const articles = [...doc.querySelectorAll(CHATGPT_ARTICLE_SELECTOR)];
       if (articles.length === 0) return null;
 
       let title =
         doc.title.replace(CHATGPT_TITLE_REPLACE_TEXT, "").trim() ||
         DEFAULT_CHAT_TITLE;
-      const messages = [];
-      let chatIndex = 1;
 
       for (const article of articles) {
-        const turnType = article.getAttribute("data-turn");
-        const header =
-          article.querySelector(CHATGPT_HEADER_SELECTOR)?.textContent?.trim() ||
-          "";
-
-        const isUser =
-          turnType === "user" ||
-          header.toLowerCase().includes(CHATGPT_USER_MESSAGE_INDICATOR);
-        const author = isUser ? "user" : "ai";
-
-        // CRITICAL FIX: Target exactly the content container to ignore action buttons
-        const contentTarget = article.querySelector(
-          ".markdown, .whitespace-pre-wrap"
-        );
-        const contentHtml = contentTarget || article;
-
-        const contentText = contentHtml.innerText.trim();
-
-        if (!contentText) continue;
-
-        const messageId = `${author}-${chatIndex}-${Date.now()}-${Math.random()
-          .toString(36)
-          .substring(2, 9)}`;
-
-        messages.push({
-          id: messageId,
-          author: author,
-          contentHtml: contentHtml, // Pass the clean container to Turndown
-          contentText: contentText,
-          timestamp: new Date(),
-          originalIndex: chatIndex,
-        });
-
-        if (!isUser) chatIndex++;
+        ChatExporter.cacheChatGPTTurn(article);
       }
+
+      const messages = ChatExporter.buildChatGPTMessagesFromCache();
+      if (messages.length === 0) return null;
 
       const _parsedTitle = Utils.parseChatTitleAndTags(title);
 
@@ -1928,6 +1969,7 @@
     _outlineIsCollapsed: false, // State for the outline collapse
     _lastProcessedChatUrl: null, // Track the last processed chat URL for Gemini
     _initialListenersAttached: false, // Track if the URL change handlers are initialized
+    _chatGPTScrollListenerAttached: false,
     autoScrollEnabled: GM_getValue("gm_auto_scroll_enabled", true),
 
     /**
@@ -2554,6 +2596,64 @@
       }
     },
 
+    findChatGPTScrollContainer() {
+      const candidates = [];
+      let currentNode = document.querySelector("main") || document.body;
+      while (currentNode) {
+        candidates.push(currentNode, ...currentNode.children);
+        currentNode = currentNode.parentElement;
+      }
+
+      return (
+        candidates.filter(
+          (element) => {
+            const overflowY = window.getComputedStyle
+              ? window.getComputedStyle(element).overflowY
+              : "";
+            return (
+              element.scrollHeight &&
+              element.clientHeight &&
+              element.scrollHeight > element.clientHeight + 1000 &&
+              /auto|scroll/.test(overflowY)
+            );
+          }
+        )
+        .sort(
+          (a, b) =>
+            b.scrollHeight -
+            b.clientHeight -
+            (a.scrollHeight - a.clientHeight)
+        )[0] ||
+        document.querySelector("main") ||
+        document.documentElement
+      );
+    },
+
+    attachChatGPTScrollListener() {
+      if (
+        CURRENT_PLATFORM !== CHATGPT ||
+        UIManager._chatGPTScrollListenerAttached
+      ) {
+        return;
+      }
+
+      const scrollableElement = UIManager.findChatGPTScrollContainer();
+      if (!scrollableElement) return;
+
+      let scrollTimeout = null;
+      scrollableElement.addEventListener(
+        "scroll",
+        () => {
+          clearTimeout(scrollTimeout);
+          scrollTimeout = setTimeout(() => {
+            UIManager.addOutlineControls();
+          }, 200);
+        },
+        { passive: true }
+      );
+      UIManager._chatGPTScrollListenerAttached = true;
+    },
+
     /**
      * Attempts to auto-scroll the Gemini chat to the top to load all messages.
      * This function uses an iterative approach to handle dynamic loading.
@@ -2780,6 +2880,7 @@
         // Always ensure outline controls are present and regenerate content on changes
         // This covers new messages, and for Gemini, scrolling up to load more content.
         UIManager.addOutlineControls();
+        UIManager.attachChatGPTScrollListener();
       });
 
       // Selector that includes chat messages and where new messages are added
@@ -2933,6 +3034,7 @@
           // console.log("Timeout elapsed. Adding export and outline controls.");
           UIManager.addExportControls();
           UIManager.addOutlineControls(); // Add outline after buttons
+          UIManager.attachChatGPTScrollListener();
           // New: Initiate auto-scroll for Gemini after controls are set up
           // console.log("Checking if current host is a Gemini hostname...");
           if (CURRENT_PLATFORM === GEMINI) {
@@ -2949,6 +3051,7 @@
             // console.log("DOMContentLoaded event fired. Adding export and outline controls after timeout.");
             UIManager.addExportControls();
             UIManager.addOutlineControls(); // Add outline after buttons
+            UIManager.attachChatGPTScrollListener();
             // New: Initiate auto-scroll for Gemini after controls are set up
             // console.log("Checking if current host is a Gemini hostname (from DOMContentLoaded).");
             if (CURRENT_PLATFORM === GEMINI) {
@@ -2969,5 +3072,10 @@
   };
 
   // --- Script Initialization ---
-  UIManager.init();
+  if (window.__AI_CHAT_EXPORTER_TEST__) {
+    window.__AI_CHAT_EXPORTER_TEST__.ChatExporter = ChatExporter;
+    window.__AI_CHAT_EXPORTER_TEST__.UIManager = UIManager;
+  } else {
+    UIManager.init();
+  }
 })();
