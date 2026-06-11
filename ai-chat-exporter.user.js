@@ -472,7 +472,7 @@
         str = str.toLocaleLowerCase();
       }
       return str
-        .replace(/[^a-zA-Z0-9\-_.+]+/g, "-")
+        .replace(/[^\p{L}\p{N}\-_.+]+/gu, "-")
         .replace(/-+/g, "-")
         .replace(/^-|-$/g, "")
         .replace(/^$/, "invalid-filename")
@@ -3141,6 +3141,7 @@
   if (window.__AI_CHAT_EXPORTER_TEST__) {
     window.__AI_CHAT_EXPORTER_TEST__.ChatExporter = ChatExporter;
     window.__AI_CHAT_EXPORTER_TEST__.UIManager = UIManager;
+    window.__AI_CHAT_EXPORTER_TEST__.Utils = Utils;
   } else {
     UIManager.init();
   }

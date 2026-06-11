@@ -179,7 +179,7 @@ assert.ok(
   "expected test hook to expose ChatExporter"
 );
 
-const { ChatExporter } = sandbox.window.__AI_CHAT_EXPORTER_TEST__;
+const { ChatExporter, Utils } = sandbox.window.__AI_CHAT_EXPORTER_TEST__;
 let firstScan = ChatExporter.extractChatGPTChatData(sandbox.document);
 assert.strictEqual(
   JSON.stringify(firstScan.messages.map((message) => message.contentText)),
@@ -312,6 +312,18 @@ const markdownResult = ChatExporter.formatToMarkdown(userCodeScan, {
 assert.ok(
   markdownResult.output.includes("> ```\n> line one\n> line two\n> ```"),
   "expected multiline ChatGPT user inline-code prompts to export as fenced blocks"
+);
+
+const chineseTitleFileName = Utils.formatFileName(
+  "{platform}_{title}",
+  "主线程卡顿原因分析",
+  [],
+  "md"
+);
+assert.strictEqual(
+  chineseTitleFileName,
+  "chatgpt_主线程卡顿原因分析.md",
+  "expected non-Latin chat titles to be preserved in filenames"
 );
 
 console.log("chatgpt virtual scroll cache test passed");
